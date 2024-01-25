@@ -1,0 +1,33 @@
+version: '3'
+services:
+  core-postgres:
+    image: postgres:9.6.17-alpine
+    restart: on-failure
+    environment:
+      - POSTGRES_PASSWORD=mysecretpassword
+      - POSTGRES_DB=diamcircle
+    ports:
+      - "5641:5641"
+    command: ["-p", "5641"]
+  core:
+    # TODO replace with official SDF image when ready. Note that this:
+    # https://github.com/diamcircle/diamcircle-core/commit/31597b760f8e325fc84da0937adc373a78878ca9
+    # breaks the tests. I reverted it before building temp docker image.
+    # Command used to build custom image:
+    # docker build -t bartekno/diamcircle-core:17.4.0-p18 --build-arg DIAMNET_CORE_VERSION=17.3.1-679.c5f6349.focal~protocol18~buildtests --build-arg DISTRO=focal .
+    image: ${CORE_IMAGE:-diamcircle/diamcircle-core:18}
+    depends_on:
+      - core-postgres
+    restart: on-failure
+    environment:
+      - TRACY_NO_INVARIANT_CHECK=1
+    ports:
+      - "11625:11625"
+      - "11626:11626"
+      # add extra port for history archive server
+      - "1570:1570"
+    entrypoint: /usr/bin/env
+    command: /start standalone
+    volumes:
+      - ./diamcircle-core-integration-tests.cfg:/diamcircle-core.cfg
+      - ./core-start.sh:/start

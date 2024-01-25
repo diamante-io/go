@@ -1,0 +1,148 @@
+#! /usr/bin/env bash
+set -e
+
+service postgresql start
+
+# Calculate params for AWS Batch
+if [ ! -z "$AWS_BATCH_JOB_ARRAY_INDEX" ]; then
+	# The batch should have three env variables:
+	# * BATCH_START_LEDGER - start ledger of the job, must be equal 1 or a
+	#   checkpoint ledger (i + 1) % 64 == 0.
+	# * BATCH_SIZE - size of the batch in ledgers, must be multiple of 64!
+	# * BRANCH - git branch to build
+	#
+	# Ex: BATCH_START_LEDGER=63, BATCH_SIZE=64 will create the following ranges:
+	# AWS_BATCH_JOB_ARRAY_INDEX=0: [63, 127]
+	# AWS_BATCH_JOB_ARRAY_INDEX=1: [127, 191]
+	# AWS_BATCH_JOB_ARRAY_INDEX=2: [191, 255]
+	# AWS_BATCH_JOB_ARRAY_INDEX=3: [255, 319]
+	# ...
+
+	if [ $BATCH_START_LEDGER -eq 1 ]; then
+		export FROM=`expr "$BATCH_SIZE" \* "$AWS_BATCH_JOB_ARRAY_INDEX" + "$BATCH_START_LEDGER" - "2"`
+		export TO=`expr "$BATCH_SIZE" \* "$AWS_BATCH_JOB_ARRAY_INDEX" + "$BATCH_START_LEDGER" + "$BATCH_SIZE" - "2"`
+		if [ $FROM -eq -1 ]; then
+			export FROM="1"
+		fi
+	else
+		export FROM=`expr "$BATCH_SIZE" \* "$AWS_BATCH_JOB_ARRAY_INDEX" + "$BATCH_START_LEDGER"`
+		export TO=`expr "$BATCH_SIZE" \* "$AWS_BATCH_JOB_ARRAY_INDEX" + "$BATCH_START_LEDGER" + "$BATCH_SIZE"`
+	fi
+fi
+
+export LEDGER_COUNT=`expr "$TO" - "$FROM" + "1"`
+
+echo "FROM: $FROM TO: $TO"
+
+dump_aurora_db() {
+	echo "dumping history_effects"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -t -A -F"," --variable="FETCH_COUNT=100" -c "select history_effects.history_operation_id, history_effects.order, type, details, history_accounts.address, address_muxed from history_effects left join history_accounts on history_accounts.id = history_effects.history_account_id order by history_operation_id asc, \"order\" asc" > "${1}_effects"
+	echo "dumping history_ledgers"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -t -A -F"," --variable="FETCH_COUNT=100" -c "select sequence, ledger_hash, previous_ledger_hash, transaction_count, operation_count, closed_at, id, total_coins, fee_pool, base_fee, base_reserve, max_tx_set_size, protocol_version, ledger_header, successful_transaction_count, failed_transaction_count from history_ledgers order by sequence asc" > "${1}_ledgers"
+	echo "dumping history_operations"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -t -A -F"," --variable="FETCH_COUNT=100" -c "select * from history_operations order by id asc" > "${1}_operations"
+	echo "dumping history_operation_claimable_balances"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -t -A -F"," --variable="FETCH_COUNT=100" -c "select history_operation_id, history_claimable_balance_id from history_operation_claimable_balances left join history_claimable_balances on history_claimable_balances.id = history_operation_claimable_balances.history_claimable_balance_id order by history_operation_id asc, id asc" > "${1}_operation_claimable_balances"
+	echo "dumping history_operation_participants"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -t -A -F"," --variable="FETCH_COUNT=100" -c "select history_operation_id, address from history_operation_participants left join history_accounts on history_accounts.id = history_operation_participants.history_account_id order by history_operation_id asc, address asc" > "${1}_operation_participants"
+	echo "dumping history_trades"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -t -A -F"," --variable="FETCH_COUNT=100" -c "select history_trades.history_operation_id, history_trades.order, history_trades.ledger_closed_at, CASE WHEN history_trades.base_is_seller THEN history_trades.price_n ELSE history_trades.price_d END, CASE WHEN history_trades.base_is_seller THEN history_trades.price_d ELSE history_trades.price_n END, CASE WHEN history_trades.base_is_seller THEN history_trades.base_offer_id ELSE history_trades.counter_offer_id END, CASE WHEN history_trades.base_is_seller THEN history_trades.counter_offer_id ELSE history_trades.base_offer_id END, CASE WHEN history_trades.base_is_seller THEN baccount.address ELSE caccount.address END, CASE WHEN history_trades.base_is_seller THEN caccount.address ELSE baccount.address END, CASE WHEN history_trades.base_is_seller THEN basset.asset_type ELSE casset.asset_type END, CASE WHEN history_trades.base_is_seller THEN basset.asset_code ELSE casset.asset_code END, CASE WHEN history_trades.base_is_seller THEN basset.asset_issuer ELSE casset.asset_issuer END, CASE WHEN history_trades.base_is_seller THEN casset.asset_type ELSE basset.asset_type END, CASE WHEN history_trades.base_is_seller THEN casset.asset_code ELSE basset.asset_code END, CASE WHEN history_trades.base_is_seller THEN casset.asset_issuer ELSE basset.asset_issuer END from history_trades left join history_accounts baccount on baccount.id = history_trades.base_account_id left join history_accounts caccount on caccount.id = history_trades.counter_account_id left join history_assets basset on basset.id = history_trades.base_asset_id left join history_assets casset on casset.id = history_trades.counter_asset_id order by history_operation_id asc, \"order\" asc" > "${1}_trades"
+	echo "dumping history_transactions"
+	# Note: we skip `tx_meta` field here because it's a data structure (C++ unordered_map) which can be in different order
+	# in different Diamcircle-Core instances. The final fix should probably: unmarshal `tx_meta`, sort it, marshal and compare.
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -t -A -F"," --variable="FETCH_COUNT=100" -c "select transaction_hash, ledger_sequence, application_order, account, account_sequence, max_fee, operation_count, id, tx_envelope, tx_result, tx_fee_meta, signatures, memo_type, memo, time_bounds, successful, fee_charged, inner_transaction_hash, fee_account, inner_signatures, new_max_fee, account_muxed, fee_account_muxed from history_transactions order by id asc" > "${1}_transactions"
+	echo "dumping history_transaction_claimable_balances"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -t -A -F"," --variable="FETCH_COUNT=100" -c "select history_transaction_id, history_claimable_balance_id from history_transaction_claimable_balances left join history_claimable_balances on history_claimable_balances.id = history_transaction_claimable_balances.history_claimable_balance_id order by history_transaction_id, id" > "${1}_transaction_claimable_balances"
+	echo "dumping history_transaction_participants"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -t -A -F"," --variable="FETCH_COUNT=100" -c "select history_transaction_id, address from history_transaction_participants left join history_accounts on history_accounts.id = history_transaction_participants.history_account_id order by history_transaction_id, address" > "${1}_transaction_participants"
+}
+
+# pubnet aurora config
+export NETWORK_PASSPHRASE="Public Global Diamcircle Network ; September 2015"
+export HISTORY_ARCHIVE_URLS="https://s3-eu-west-1.amazonaws.com/history.diamcircle.org/prd/core-live/core_live_001"
+export DATABASE_URL="postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable"
+
+cd diamcircle-go
+git pull origin
+if [ ! -z "$BRANCH" ]; then
+	git checkout $BRANCH
+fi
+git log -1 --pretty=oneline
+
+function alter_tables_unlogged() {
+	# UNLOGGED for performance reasons (order is important because some tables reference others)
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE accounts SET UNLOGGED;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE accounts_data SET UNLOGGED;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE accounts_signers SET UNLOGGED;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE claimable_balances SET UNLOGGED;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE exp_asset_stats SET UNLOGGED;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE history_trades SET UNLOGGED;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE history_accounts SET UNLOGGED;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE history_assets SET UNLOGGED;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE history_claimable_balances SET UNLOGGED;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE history_effects SET UNLOGGED;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE history_ledgers SET UNLOGGED;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE history_operation_claimable_balances SET UNLOGGED;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE history_operation_participants SET UNLOGGED;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE history_operations SET UNLOGGED;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE history_transaction_claimable_balances SET UNLOGGED;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE history_transaction_participants SET UNLOGGED;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE history_transactions SET UNLOGGED;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE offers SET UNLOGGED;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "ALTER TABLE trust_lines SET UNLOGGED;"
+}
+
+/usr/local/go/bin/go build -v ./services/aurora
+./aurora db migrate up
+alter_tables_unlogged
+./aurora ingest verify-range --from $FROM --to $TO --verify-state
+
+function compare() {
+  local expected="old_$1"
+  local actual="new_$1"
+
+  # Files can be very large, leading to `diff` running out of memory.
+  # As a workaround, since files are expected to be identical,
+  # we compare the hashes first.
+  local hash=$(shasum -a 256 "$expected" | cut -f 1 -d ' ')
+  local check_command="$hash  $actual"
+
+  if ! ( echo "$check_command" | shasum -a 256 -c ); then
+    diff --speed-large-files "$expected" "$actual"
+  fi
+}
+
+BASE_BRANCH=${BASE_BRANCH:-aurora-v2.0.0}
+
+if [ ! -z "$VERIFY_HISTORY" ]; then
+	dump_aurora_db "new_history"
+
+	echo "Done dump_aurora_db new_history"
+
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "DROP SCHEMA public CASCADE;"
+	psql "postgres://postgres:postgres@localhost:5432/aurora?sslmode=disable" -c "CREATE SCHEMA public;"
+
+	git checkout "$BASE_BRANCH"
+
+	/usr/local/go/bin/go build -v ./services/aurora
+
+	./aurora db migrate up
+	alter_tables_unlogged
+	REINGEST_FROM=$((FROM + 1)) # verify-range does not ingest starting ledger
+	./aurora db reingest range $REINGEST_FROM $TO
+
+	dump_aurora_db "old_history"
+	echo "Done dump_aurora_db old_history"
+
+	compare history_effects
+	compare history_ledgers
+	compare history_operations
+	compare history_operation_claimable_balances
+	compare history_operation_participants
+	compare history_trades
+	compare history_transactions
+	compare history_transaction_claimable_balances
+	compare history_transaction_participants
+fi
+
+echo "OK"

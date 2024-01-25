@@ -1,0 +1,9 @@
+version: '3'
+services:
+  aurora:
+    environment:
+      - HISTORY_ARCHIVE_URLS=https://history.diamcircle.org/prd/core-live/core_live_001
+      - NETWORK_PASSPHRASE=Public Global Diamcircle Network ; September 2015
+      - CAPTIVE_CORE_CONFIG_APPEND_PATH=/captive-core-pubnet.cfg
+    volumes:
+      - ./captive-core-pubnet.cfg:/captive-core-pubnet.cfg

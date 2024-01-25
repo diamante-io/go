@@ -1,0 +1,15 @@
+.DS_Store
+/vendor
+/dist
+/local-archive
+/.vscode/*.sql
+/.vscode/settings.json
+.idea
+debug
+.bundle
+*.swp
+*.crt
+*.csr
+*.key
+*.prof
+*.test

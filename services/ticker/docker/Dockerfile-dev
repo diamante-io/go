@@ -1,0 +1,21 @@
+FROM golang:1.17-stretch as build
+
+LABEL maintainer="Alex Cordeiro <alexc@diamcircle.org>"
+
+EXPOSE 5432
+EXPOSE 8000
+
+ADD . /src/ticker
+WORKDIR /src/ticker
+RUN go build -o /opt/diamcircle/bin/ticker ./services/ticker/
+
+WORKDIR /src/ticker/services/ticker/docker/
+RUN ["chmod", "+x", "./dependencies"]
+RUN ["./dependencies"]
+RUN ["chmod", "+x", "setup"]
+RUN ["./setup"]
+RUN ["cp", "-r", "conf", "/opt/diamcircle/conf"]
+RUN ["crontab", "-u", "diamcircle", "/opt/diamcircle/conf/crontab.txt"]
+RUN ["chmod", "+x", "start"]
+
+ENTRYPOINT ["/src/ticker/services/ticker/docker/start"]
