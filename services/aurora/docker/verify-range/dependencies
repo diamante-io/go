@@ -1,0 +1,29 @@
+#! /usr/bin/env bash
+set -e
+
+apt-get update
+apt-get install -y curl git libpq-dev libsqlite3-dev libsasl2-dev postgresql-client postgresql postgresql-contrib sudo vim zlib1g-dev wget gnupg2 lsb-release
+apt-get clean
+
+wget -qO - https://apt.diamcircle.org/SDF.asc | apt-key add -
+echo "deb https://apt.diamcircle.org $(lsb_release -cs) stable" | sudo tee -a /etc/apt/sources.list.d/SDF.list
+echo "deb https://apt.diamcircle.org $(lsb_release -cs) unstable" | sudo tee -a /etc/apt/sources.list.d/SDF-unstable.list
+apt-get update
+apt-get install -y diamcircle-core=${diamcircle_CORE_VERSION}
+
+wget https://dl.google.com/go/go1.17.linux-amd64.tar.gz
+tar -C /usr/local -xzf go1.17.linux-amd64.tar.gz
+
+# configure postgres
+service postgresql start
+sudo -u postgres createdb aurora
+
+sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres';"
+
+git clone https://go.git diamcircle-go
+cd diamcircle-go
+# By default "git fetch" only fetches refs/<branchname>
+# Below ensures we also fetch PR refs
+git config --add remote.origin.fetch "+refs/pull/*/head:refs/remotes/origin/pull/*"
+git fetch --force --quiet origin
+/usr/local/go/bin/go build -v ./services/aurora

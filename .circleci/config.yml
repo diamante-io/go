@@ -1,0 +1,537 @@
+version: 2.1
+
+#----------------------------------------------------------------------------#
+# Commands are used as building blocks for jobs, which run through workflows #
+#----------------------------------------------------------------------------#
+
+commands:
+  checkout:
+    steps:
+      - run:
+          name: checkout
+          command: |
+            # Copy of the upstream checkout command with the following modifications:
+            # 1. CIRCLE_REPOSITORY_URL is updated to use https rather than ssh
+            # 2. Removed ssh specific sections
+
+            # Use https rather than ssh to clone public projects
+            CIRCLE_REPOSITORY_URL=${CIRCLE_REPOSITORY_URL/://}
+            CIRCLE_REPOSITORY_URL=${CIRCLE_REPOSITORY_URL/git@/https://}
+
+            echo "Repository URL: ${CIRCLE_REPOSITORY_URL}"
+
+            # Workaround old docker images with incorrect $HOME
+            # check https://github.com/docker/docker/issues/2968 for details
+            if [ "${HOME}" = "/" ]
+            then
+              export HOME=$(getent passwd $(id -un) | cut -d: -f6)
+            fi
+
+            # Ensure ~ is expanded otherwise bash treats is as string literal
+            eval CIRCLE_WORKING_DIRECTORY=${CIRCLE_WORKING_DIRECTORY}
+            if [ -e ${CIRCLE_WORKING_DIRECTORY}/.git ]
+            then
+              cd ${CIRCLE_WORKING_DIRECTORY}
+              git remote set-url origin "$CIRCLE_REPOSITORY_URL" || true
+            else
+              mkdir -p ${CIRCLE_WORKING_DIRECTORY}
+              cd ${CIRCLE_WORKING_DIRECTORY}
+              git clone "$CIRCLE_REPOSITORY_URL" .
+            fi
+
+            if [ -n "$CIRCLE_TAG" ]
+            then
+              git fetch --force origin "refs/tags/${CIRCLE_TAG}"
+            else
+              # By default "git fetch" only fetches refs/<branchname>
+              # Below ensures we also fetch PR refs
+              git config --add remote.origin.fetch "+refs/pull/*/head:refs/remotes/origin/pull/*"
+              git fetch --force --quiet origin
+            fi
+
+            if [ -n "$CIRCLE_TAG" ]
+            then
+              git reset --hard "$CIRCLE_SHA1"
+              git checkout -q "$CIRCLE_TAG"
+            elif [ -n "$CIRCLE_BRANCH" ]
+            then
+              git reset --hard "$CIRCLE_SHA1"
+              git checkout -q -B "$CIRCLE_BRANCH"
+            fi
+
+            git reset --hard "$CIRCLE_SHA1"
+
+  # gofmt performs checks on the entire codebase to ensure everything is formated
+  # with the gofmt tool.
+  gofmt:
+    steps:
+      - checkout
+      - run:
+          name: Run gofmt
+          command: ./gofmt.sh
+
+  # gogenerate validates that any generated code has been updated if needed.
+  gogenerate:
+    steps:
+      - checkout
+      - run:
+          name: Check generated code
+          command: ./gogenerate.sh
+
+  # govet does govet checks in the entire codebase.
+  govet:
+    steps:
+      - checkout
+      - run:
+          name: Run govet
+          command: ./govet.sh
+
+  # staticcheck runs staticcheck in the entire codebase.
+  staticcheck:
+    steps:
+      - checkout
+      - run:
+          name: Run staticcheck
+          command: ./staticcheck.sh
+
+  # check_deprecations ensures a release is actually removing deprecated fields
+  # that were supposed to be discontinued in said release.
+  check_deprecations:
+    steps:
+      - run:
+          name: Run deprecation tests when on a tagged commit
+          command: |
+            if [ "$CIRCLE_TAG" != "" ]; then
+              # Negate the result so process exits with 1 if anything found
+              echo "Searching for \"action needed\" tags..."
+              ! egrep -irn -A 1 --include=*.go "Action.+needed.+in.+release:.+$CIRCLE_TAG" ./
+            fi
+
+  # install_golang installs golang, it's only used in aurora integration tests,
+  # other jobs use golang docker image.
+  install_golang:
+    steps:
+      - run:
+          name: Download and install golang
+          command: |
+            sudo rm -rf /usr/local/go
+            wget https://dl.google.com/go/go1.17.linux-amd64.tar.gz
+            sudo tar -C /usr/local -xzf go1.17.linux-amd64.tar.gz
+
+  # install_go_deps installs the go dependencies of the project.
+  install_go_deps:
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - go-mod-v1-{{ checksum "go.mod" }}-{{ checksum "go.sum" }}
+      - run:
+          name: Download dependencies
+          command: |
+            go mod download
+      - save_cache:
+          key: go-mod-v1-{{ checksum "go.mod" }}-{{ checksum "go.sum" }}
+          paths:
+            - /go/pkg/mod
+
+  # check_go_deps validates that the dependencies are expected.
+  check_go_deps:
+    steps:
+      - checkout
+      - run:
+          name: Check dependencies
+          command: ./gomod.sh
+
+  # install_diamcircle_core installs the latest unstable version of diamcircle core.
+  install_diamcircle_core:
+    parameters:
+      core-version:
+        type: string
+        default: "18.0.3-746.f3baea6.focal"
+    steps:
+      - run:
+          name: Install diamcircle Core <<#parameters.core-version>> (version <<parameters.core-version>>)<</parameters.core-version>>
+          command: |
+            sudo wget -qO - https://apt.diamcircle.org/SDF.asc | APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=true sudo apt-key add -
+            sudo bash -c 'echo "deb https://apt.diamcircle.org focal unstable" > /etc/apt/sources.list.d/SDF-unstable.list'
+            sudo apt-get update && sudo apt-get install -y diamcircle-core<<#parameters.core-version>>=<<parameters.core-version>><</parameters.core-version>>
+            echo "using diamcircle core version $(diamcircle-core version)"
+            echo "export CAPTIVE_CORE_BIN=/usr/bin/diamcircle-core" >> $BASH_ENV
+
+  check_ingest_state:
+    steps:
+      - run:
+          name: Getting latest checkpoint ledger
+          command: |
+            export LATEST_LEDGER=`curl -s http://history.diamcircle.org/prd/core-live/core_live_001/.well-known/diamcircle-history.json | jq -r '.currentLedger'`
+            echo $LATEST_LEDGER # For debug
+            echo "export LATEST_LEDGER=$LATEST_LEDGER" >> $BASH_ENV # Persist between steps
+      - run:
+          name: Dump state using ingest
+          command: go run -v ./exp/tools/dump-ledger-state/
+      - run:
+          name: Init diamcircle-core DB
+          command: diamcircle-core --conf ./exp/tools/dump-ledger-state/diamcircle-core.cfg new-db
+      - run:
+          name: Catchup core
+          command: diamcircle-core --conf ./exp/tools/dump-ledger-state/diamcircle-core.cfg catchup $LATEST_LEDGER/1
+      - run:
+          name: Dump diamcircle-core DB
+          command: ./exp/tools/dump-ledger-state/dump_core_db.sh
+      - run:
+          name: Compare state dumps
+          command: ./exp/tools/dump-ledger-state/diff_test.sh
+
+  # test_packages performs tests on all packages of the monorepo.
+  test_packages:
+    steps:
+      - run:
+          name: Install dockerize
+          command: wget https://github.com/jwilder/dockerize/releases/download/$DOCKERIZE_VERSION/dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz && tar -C /usr/local/bin -xzvf dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz && rm dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz
+          environment:
+            DOCKERIZE_VERSION: v0.3.0
+      - run:
+          name: Wait for postgres
+          command: |
+            dockerize -wait tcp://localhost:5432 -timeout 1m
+      - run:
+          name: Run package tests
+          environment:
+            # When running on Docker in Circle, Go thinks there are 36 CPUs
+            # which means the default number of parallel build processes will be 36
+            # but using 36 build processes can lead to OOM errors
+            # because according to https://circleci.com/docs/2.0/configuration-reference/#resource_class ,
+            # the default Docker container only has 2 CPUs available.
+            # That is why we explicitly specify -p=4 to reduce the number of parallel build processes
+            GOFLAGS: -p=4
+          command: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
+
+  # build_packages creates the project's artifacts.
+  build_packages:
+    steps:
+      - run:
+          name: Build release artifacts dependencies
+          command: |
+            apt-get update
+            apt-get install -y zip
+      - run:
+          name: Build release artifacts
+          command: go run ./support/scripts/build_release_artifacts/main.go
+
+#-----------------------------------------------------------------------------#
+# Jobs use the commands to accomplish a given task, and run through workflows #
+#-----------------------------------------------------------------------------#
+
+jobs:
+  # check_code_1_17 performs code checks using Go 1.17.
+  check_code_1_17:
+    working_directory: /go/src/go
+    docker:
+      - image: golang:1.17
+    steps:
+      - install_go_deps
+      - check_go_deps
+      - gofmt
+      - gogenerate
+      - govet
+      - staticcheck
+      - build_packages
+
+  # test_code_1_16 performs all package tests using Go 1.16.
+  test_code_1_16:
+    working_directory: /go/src/go
+    docker:
+      - image: golang:1.16
+        environment:
+          GO111MODULE: "on"
+          PGHOST: localhost
+          PGPORT: 5432
+          PGUSER: circleci
+          PGDATABASE: circle_test
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: 3306
+      - image: circleci/postgres:9.6.5-alpine-ram
+        environment:
+          POSTGRES_USER: circleci
+    steps:
+      - install_go_deps
+      - test_packages
+
+  # test_code_1_16 performs all package tests using Go 1.16 and Postgres 10.
+  test_code_1_16_postgres10:
+    working_directory: /go/src/go
+    docker:
+      - image: golang:1.16
+        environment:
+          GO111MODULE: "on"
+          PGHOST: localhost
+          PGPORT: 5432
+          PGUSER: circleci
+          PGDATABASE: circle_test
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: 3306
+      - image: circleci/postgres:10-alpine-ram
+        environment:
+          POSTGRES_USER: circleci
+      - image: circleci/redis:5.0-alpine
+    steps:
+      - install_go_deps
+      - test_packages
+
+  # test_code_1_17 performs all package tests using Go 1.17.
+  test_code_1_17:
+    working_directory: /go/src/go
+    docker:
+      - image: golang:1.17
+        environment:
+          GO111MODULE: "on"
+          PGHOST: localhost
+          PGPORT: 5432
+          PGUSER: circleci
+          PGDATABASE: circle_test
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: 3306
+      - image: circleci/postgres:9.6.5-alpine-ram
+        environment:
+          POSTGRES_USER: circleci
+    steps:
+      - install_go_deps
+      - test_packages
+
+  # test_code_1_17 performs all package tests using Go 1.17 and Postgres 10.
+  test_code_1_17_postgres10:
+    working_directory: /go/src/go
+    docker:
+      - image: golang:1.17
+        environment:
+          GO111MODULE: "on"
+          PGHOST: localhost
+          PGPORT: 5432
+          PGUSER: circleci
+          PGDATABASE: circle_test
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: 3306
+      - image: circleci/postgres:10-alpine-ram
+        environment:
+          POSTGRES_USER: circleci
+      - image: circleci/redis:5.0-alpine
+    steps:
+      - install_go_deps
+      - test_packages
+  # publish_artifacts builds and uploads artifacts to any tagged commit.
+  #
+  # NOTE: this commands relies on an env var called GITHUB_TOKEN which is a
+  # GH OAUTH token with `repo` access.
+  publish_artifacts:
+    working_directory: /go/src/go
+    docker:
+      - image: golang:1.17
+    steps:
+      - check_deprecations
+      - install_go_deps
+      - check_go_deps
+      - build_packages
+      - attach_workspace:
+          at: ./dist
+      - run:
+          name: "Publish release on GitHub"
+          command: |
+            if [ "$(ls -A ./dist)" ]
+            then
+              go get github.com/tcnksm/ghr
+              ghr -t ${GITHUB_TOKEN} -u ${CIRCLE_PROJECT_USERNAME} -r ${CIRCLE_PROJECT_REPONAME} -c ${CIRCLE_SHA1} ${CIRCLE_TAG} ./dist/
+            else
+                echo "No files found in ./dist. No binaries to publish for ${CIRCLE_TAG}."
+            fi
+
+  publish_state_diff_docker_image:
+    docker:
+      - image: docker:18.04-git
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Build and Push Docker image
+          command: |
+            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+            docker build --no-cache -f exp/tools/dump-ledger-state/Dockerfile --build-arg GITCOMMIT=$CIRCLE_SHA1 -t diamcircle/ledger-state-diff:$CIRCLE_SHA1 -t diamcircle/ledger-state-diff:latest .
+            docker push diamcircle/ledger-state-diff:$CIRCLE_SHA1
+            docker push diamcircle/ledger-state-diff:latest
+
+  publish_aurora_docker_image:
+    docker:
+      - image: docker:18.04-git
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Build and Push Docker image
+          command: |
+            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+            # CIRCLE_TAG will be prefixed by "aurora-v", here we build the aurora docker image and tag it with diamcircle/aurora:$VERSION
+            # where version is CIRCLE_TAG without the "aurora-v" prefix
+            VERSION=${CIRCLE_TAG#aurora-v}
+            docker build -f services/aurora/docker/Dockerfile.dev -t diamcircle/aurora:$VERSION .
+            docker push diamcircle/aurora:$VERSION
+
+  test_verify_range_docker_image:
+    parameters:
+      publish:
+        type: boolean
+        default: false
+    docker:
+      - image: docker:18.04-git
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Build, test<<#parameters.publish>> and Push<</parameters.publish>> the Verify Range Docker image
+          command: |
+            docker build -f services/aurora/docker/verify-range/Dockerfile -t diamcircle/aurora-verify-range services/aurora/docker/verify-range/
+            # Any range should do for basic testing, this range was chosen pretty early in history so that it only takes a few mins to run
+            docker run -ti -e BRANCH=${CIRCLE_SHA1} -e FROM=10000063 -e TO=10000127 diamcircle/aurora-verify-range
+            <<#parameters.publish>>
+            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+            docker push diamcircle/aurora-verify-range
+            <</parameters.publish>>
+
+  publish_latest_aurora_docker_image:
+    docker:
+      - image: docker:18.04-git
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Build and Push Docker image
+          command: |
+            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+            docker build -f services/aurora/docker/Dockerfile.dev -t diamcircle/aurora:latest .
+            docker push diamcircle/aurora:latest
+
+  publish_commit_hash_aurora_docker_image:
+    docker:
+      - image: docker:18.04-git
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Build and Push Docker image
+          command: |
+            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+            TAG=$(git rev-parse --short HEAD)
+            docker build -f services/aurora/docker/Dockerfile.dev -t diamcircle/aurora:$TAG .
+            docker push diamcircle/aurora:$TAG
+
+  # test_aurora_integration performs aurora integration tests, it's using
+  # decicated vm machine to be able to start arbitrary docker containers.
+  test_aurora_integration:
+    parameters:
+      enable-captive-core:
+        type: boolean
+        default: false
+    working_directory: ~/go/src/go
+    machine:
+      image: ubuntu-2004:202010-01
+    steps:
+      - checkout
+      - run:
+          name: Setting env variables
+          command: echo "export aurora_INTEGRATION_TESTS=true" >> $BASH_ENV
+      - run:
+          name: Pull latest diamcircle Core image
+          command: docker pull diamcircle/diamcircle-core
+      - install_golang
+      - run:
+          name: Start aurora Postgres DB
+          command: docker run -d --env POSTGRES_HOST_AUTH_METHOD=trust -p 5432:5432 circleci/postgres:9.6.5-alpine
+      - when:
+          condition: <<parameters.enable-captive-core>>
+          steps:
+            - install_diamcircle_core
+            - run:
+                name: Setting Captive Core env variables
+                command: echo "export aurora_INTEGRATION_ENABLE_CAPTIVE_CORE=true" >> $BASH_ENV
+      - run:
+          name: Run aurora integration tests <<#parameters.enable-captive-core>>(With captive core)<</parameters.enable-captive-core>>
+          # Currently all integration tests are in a single directory.
+          command: |
+            cd ~/go/src/go
+            go test -race -timeout 25m -v ./services/aurora/internal/integration/...
+
+#-------------------------------------------------------------------------#
+# Workflows orchestrate jobs and make sure they run in the right sequence #
+#-------------------------------------------------------------------------#
+
+workflows:
+  version: 2
+
+  check_code_and_test:
+    jobs:
+      - check_code_1_17
+      - test_code_1_16
+      - test_code_1_16_postgres10
+      - test_code_1_17
+      - test_code_1_17_postgres10
+      # run the integration tests ...
+      #   ... without captive core
+      - test_aurora_integration
+      #   ... and with captive core
+      - test_aurora_integration:
+          name: test_aurora_integration_with_captive_core
+          enable-captive-core: true
+      - test_verify_range_docker_image:
+          filters:
+            # we use test_verify_range_docker_image with publish in master
+            branches:
+              ignore: master
+      - publish_state_diff_docker_image:
+          filters:
+            branches:
+              only: master
+
+  build_and_deploy:
+    jobs:
+      - publish_artifacts:
+          filters:
+            tags:
+              ignore: snapshots
+            branches:
+              ignore: /.*/
+      - publish_commit_hash_aurora_docker_image:
+          filters:
+            tags:
+              ignore: /.*/
+            branches:
+              only: master
+      - publish_aurora_docker_image:
+          filters:
+            tags:
+              only: /^aurora-v.*/
+            branches:
+              ignore: /.*/
+      - hold: # <<< A job that will require manual approval in the CircleCI web application.
+          filters:
+            tags:
+              only: /^aurora-v.*/
+            branches:
+              ignore: /.*/
+          type: approval # <<< This key-value pair will set your workflow to a status of "On Hold"
+          requires: # We only run the "hold" job when publish_aurora_docker_image has succeeded
+            - publish_aurora_docker_image
+      - publish_latest_aurora_docker_image:
+          filters:
+            tags:
+              only: /^aurora-v.*/
+            branches:
+              ignore: /.*/
+          # Pushing diamcircle/aurora:latest to docker hub requires manual approval
+          requires:
+            - hold
+      - test_verify_range_docker_image:
+          name: test_and_publish_verify_range_docker_image
+          publish: true
+          filters:
+            tags:
+              ignore: /.*/
+            branches:
+              only: master

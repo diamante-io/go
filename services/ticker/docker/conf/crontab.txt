@@ -1,0 +1,17 @@
+# ---------------
+# Ticker Crontab
+# ---------------
+# Refresh the database of assets, hourly:
+@hourly /opt/diamcircle/bin/ticker ingest assets > /home/diamcircle/last-ingest-assets.log 2>&1
+
+# Refresh the database of orderbooks, every 10 minutes:
+*/10 * * * * /opt/diamcircle/bin/ticker ingest orderbooks > /home/diamcircle/last-ingest-orderbooks.log 2>&1
+
+# Backfill the database of trades (including possible new assets), every 6 hours:
+0 */6 * * * /opt/diamcircle/bin/ticker ingest trades > /home/diamcircle/last-ingest-trades.log 2>&1
+
+# Update the assets.json file, hourly:
+@hourly /opt/diamcircle/bin/ticker generate asset-data -o /opt/diamcircle/www/assets.json > /home/diamcircle/last-generate-asset-data.log 2>&1
+
+# Update the markets.json file, every minute:
+* * * * * /opt/diamcircle/bin/ticker generate market-data -o /opt/diamcircle/www/markets.json > /home/diamcircle/last-generate-market-data.log 2>&1

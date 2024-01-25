@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -e
+
+useradd --uid 10011001 --home-dir /home/diamcircle --no-log-init diamcircle \
+    && mkdir -p /home/diamcircle \
+    && chown -R diamcircle:diamcircle /home/diamcircle
+
+mkdir -p /opt/diamcircle/bin
+mkdir -p /opt/diamcircle/www
+chown -R diamcircle:diamcircle /opt/diamcircle/www
+mkdir -p /opt/diamcircle/postgresql/data

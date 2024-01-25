@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+set -e
+
+
+export diamcircle_HOME="/opt/diamcircle"
+export diamcircle_BIN="$diamcircle_HOME/bin"
+export CONF_HOME="$diamcircle_HOME/conf"
+export WWW_HOME="$diamcircle_HOME/www"
+
+export PGHOME="$diamcircle_HOME/postgresql"
+export PGBIN="/usr/lib/postgresql/9.5/bin"
+export PGDATA="$PGHOME/data"
+export PGUSER="diamcircle"
+export PGDB="ticker"
+export PGURL="postgres://127.0.0.1:5432/$PGDB"
+
+
+function main() {
+	echo ""
+	echo "Initializing Ticker"
+	echo ""
+
+	init_db
+	copy_pgpass
+
+	start_postgres
+	migrate_db
+
+	populate_assets
+	populate_trades
+	populate_orderbooks
+	generate_assets_file
+	generate_markets_file
+
+	stop_postgres
+	exec_supervisor
+}
+
+
+function migrate_db() {
+	echo ""
+	echo "Upgrading database to latest version"
+	echo ""
+	sudo -E -u diamcircle $diamcircle_BIN/ticker migrate
+}
+
+
+function populate_assets() {
+	if [ -f $PGHOME/.assets-populated ]; then
+		echo "ticker: assets already pre-populated"
+		return 0
+	fi
+	echo ""
+	echo "Populating initial asset database"
+	echo ""
+	sudo -E -u diamcircle $diamcircle_BIN/ticker ingest assets
+	touch $PGHOME/.assets-populated
+}
+
+
+function populate_trades() {
+	if [ -f $PGHOME/.trades-populated ]; then
+		echo "ticker: trades already pre-populated"
+		return 0
+	fi
+	echo ""
+	echo "Populating initial trade database"
+	echo ""
+	sudo -E -u diamcircle $diamcircle_BIN/ticker ingest trades
+	touch $PGHOME/.trades-populated
+}
+
+
+function populate_orderbooks() {
+	if [ -f $PGHOME/.orderbooks-populated ]; then
+		echo "ticker: orderbooks already pre-populated"
+		return 0
+	fi
+	echo ""
+	echo "Populating initial orderbook database"
+	echo ""
+	sudo -E -u diamcircle $diamcircle_BIN/ticker ingest orderbooks
+	touch $PGHOME/.orderbooks-populated
+}
+
+
+function generate_assets_file() {
+	if [ -f $diamcircle_HOME/www/assets.json ]; then
+		echo "ticker: assets.json already pre-populated"
+		return 0
+	fi
+	echo ""
+	echo "Creating assets.json file"
+	echo ""
+	sudo -E -u diamcircle $diamcircle_BIN/ticker generate asset-data -o $WWW_HOME/assets.json
+}
+
+
+function generate_markets_file() {
+	if [ -f $diamcircle_HOME/www/markets.json ]; then
+		echo "ticker: markets.json already pre-populated"
+		return 0
+	fi
+	echo ""
+	echo "Creating markets.json file"
+	echo ""
+	sudo -E -u diamcircle $diamcircle_BIN/ticker generate market-data -o $WWW_HOME/markets.json
+}
+
+
+# run_silent is a utility function that runs a command with an abbreviated
+# output provided it succeeds.
+function run_silent() {
+	local LABEL=$1
+	shift
+	local COMMAND=$1
+	shift
+	local ARGS=$@
+	local OUTFILE="/tmp/run_silent.out"
+
+	echo -n "$LABEL: "
+	set +e
+
+	$COMMAND $ARGS &> $OUTFILE
+
+	if [ $? -eq 0 ]; then
+    echo "ok"
+	else
+	  echo "failed!"
+		echo ""
+		cat $OUTFILE
+		exit 1
+	fi
+
+	set -e
+}
+
+
+function set_db_url() {
+	PGPASS="diamcircle"
+	export DB_URL="postgres://diamcircle:${PGPASS}@127.0.0.1:5432/ticker"
+	echo "Setting db url: $DB_URL"
+	echo DB_URL="${DB_URL}" >> /etc/environment
+}
+
+function copy_pgpass() {
+	cp $PGHOME/.pgpass /home/diamcircle
+	chmod 0600 /home/diamcircle/.pgpass
+	chown diamcircle:diamcircle /home/diamcircle/.pgpass
+}
+
+
+function init_db() {
+	if [ -f $PGHOME/.quickstart-initialized ]; then
+		echo "postgres: already initialized"
+		return 0
+	fi
+	pushd $PGHOME
+
+	echo "postgres user: $PGUSER"
+
+	set_db_url
+
+	run_silent "finalize-pgpass" sed -ri "s/__PGPASS__/$PGPASS/g" $CONF_HOME/.pgpass
+
+	cp $CONF_HOME/.pgpass $PGHOME/.pgpass
+
+	mkdir -p $PGDATA
+	chown postgres:postgres $PGDATA
+	chmod 0700 $PGDATA
+
+	run_silent "init-postgres" sudo -u postgres $PGBIN/initdb -D $PGDATA
+
+	start_postgres
+	run_silent "create-ticker-db" sudo -u postgres createdb $PGDB
+	run_silent "diamcircle-postgres-user" sudo -u postgres psql <<-SQL
+		CREATE USER $PGUSER WITH PASSWORD '$PGPASS';
+		GRANT ALL PRIVILEGES ON DATABASE $PGDB to $PGUSER;
+	SQL
+
+	touch .quickstart-initialized
+	popd
+}
+
+
+function start_postgres() {
+	if [ ! -z "$CURRENT_POSTGRES_PID" ]; then
+		return 0
+	fi
+
+	sudo -u postgres $PGBIN/postgres -D $PGDATA -c config_file=$CONF_HOME/postgresql.conf &> /dev/null &
+	CURRENT_POSTGRES_PID=$!
+
+	while ! sudo -u postgres psql -c 'select 1' &> /dev/null ; do
+	  echo "Waiting for postgres to be available..."
+	  sleep 1
+	done
+
+	echo "postgres: up"
+}
+
+
+function stop_postgres() {
+	if [ -z "$CURRENT_POSTGRES_PID" ]; then
+		return 0
+	fi
+
+	killall postgres
+	# wait for postgres to die
+	while kill -0 "$CURRENT_POSTGRES_PID" &> /dev/null; do
+		sleep 0.5
+	done
+	echo "postgres: down"
+}
+
+
+function exec_supervisor() {
+	echo "starting supervisor"
+	exec supervisord -n -c $CONF_HOME/supervisord.conf
+}
+
+
+pushd () {
+    command pushd "$@" > /dev/null
+}
+
+
+popd () {
+    command popd "$@" > /dev/null
+}
+
+
+main $@

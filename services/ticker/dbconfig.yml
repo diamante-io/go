@@ -1,0 +1,5 @@
+development:
+    dialect: postgres
+    datasource: dbname=diamcircleticker01 sslmode=disable
+    dir: internal/tickerdb/migrations
+    table: migrations

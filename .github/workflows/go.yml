@@ -1,0 +1,86 @@
+name: Go
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+
+  check:
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        go: [1.17]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Go
+      uses: actions/setup-go@v2
+      with:
+        go-version: ${{ matrix.go }}
+    - run: ./gomod.sh
+    - run: ./gofmt.sh
+    - run: ./gogenerate.sh
+    - run: ./govet.sh
+    - run: ./staticcheck.sh
+
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        go: [1.17, 1.16.7]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Go
+      uses: actions/setup-go@v2
+      with:
+        go-version: ${{ matrix.go }}
+    - run: go build ./...
+
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        go: [1.17, 1.16.7]
+        pg: [9.6.5, 10]
+    runs-on: ${{ matrix.os }}
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+        - 5432:5432
+      redis:
+        image: redis
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+        - 6379:6379
+    env: 
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: postgres
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Go
+      uses: actions/setup-go@v2
+      with:
+        go-version: ${{ matrix.go }}
+    - run: go test -race -cover ./...

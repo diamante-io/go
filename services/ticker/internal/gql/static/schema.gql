@@ -1,0 +1,120 @@
+schema {
+	query: 	Query
+}
+
+type Query {
+	# retrieve all validated assets on the diamcircle network.
+	assets: [Asset!]!
+
+	# retrieve all validated issuers on the diamcircle network.
+	issuers: [Issuer!]!
+
+	# retrieve trade stats from the last <numHoursAgo> hours
+	# (default = 24 hours). optionally provide counter and
+	# base asset info for filtering.
+	markets(
+		baseAssetCode: String
+		baseAssetIssuer: String
+		counterAssetCode: String
+		counterAssetIssuer: String
+		numHoursAgo: Int
+	): [Market]!
+
+	# retrieve aggregated trade stats for the last <numHoursAgo>
+	# hours. optionally provide a pairName (e.g. "XLM_BTC" or a 
+	# single currency (e.g. "XLM") for filtering results.
+	ticker(
+		pairName: String
+		numHoursAgo: Int
+	): [AggregatedMarket]!
+}
+
+scalar BigInt
+scalar Time
+
+type Asset {
+	code: String!
+	issuerAccount: String!
+	type: String!
+	numAccounts: Int!
+	authRequired: Boolean!
+	authRevocable: Boolean!
+	amount: Float!
+	assetControlledByDomain: Boolean!
+	anchorAssetCode: String!
+	anchorAssetType: String!
+	isAssetAnchored: Boolean!
+	displayDecimals: BigInt!
+	name: String!
+	desc: String!
+	conditions: String!
+	fixedNumber: BigInt!
+	maxNumber: BigInt!
+	isUnlimited: Boolean!
+	redemptionInstructions: String!
+	collateralAddresses: String!
+	collateralAddressSignatures: String!
+	countries: String!
+	status: String!
+	issuerID: Int!
+}
+
+type Market {
+	tradePair: String!
+	baseAssetCode: String!
+	baseAssetIssuer: String!
+	counterAssetCode: String!
+	counterAssetIssuer: String!
+	baseVolume: Float!
+	counterVolume: Float!
+	tradeCount: Int!
+	open: Float!
+	low: Float!
+	high: Float!
+	change: Float!
+	close: Float!
+	intervalStart: Time!
+	firstLedgerCloseTime: Time!
+	lastLedgerCloseTime: Time!
+	orderbookStats: OrderbookStats!
+}
+
+type AggregatedMarket {
+	tradePair: String!
+	baseVolume: Float!
+	counterVolume: Float!
+	tradeCount: Int!
+	open: Float!
+	low: Float!
+	high: Float!
+	change: Float!
+	close: Float!
+	intervalStart: Time!
+	firstLedgerCloseTime: Time!
+	lastLedgerCloseTime: Time!
+	orderbookStats: OrderbookStats!
+}
+
+type OrderbookStats {
+ 	bidCount: BigInt!
+	bidVolume: Float!
+	bidMax: Float!
+	askCount: BigInt!
+	askVolume: Float!
+	askMin: Float!
+	spread: Float!
+	spreadMidPoint: Float!
+}
+
+type Issuer {
+	publicKey: String!
+	name: String!
+	url: String!
+	tomlURL: String!
+	federationServer: String!
+	authServer: String!
+	transferServer: String!
+	webAuthEndpoint: String!
+	depositServer: String!
+	orgTwitter: String!
+}

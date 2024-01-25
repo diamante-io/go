@@ -1,0 +1,5 @@
+{
+    schema: {
+        files: 'internal/gql/**/*.gql'
+    }
+}

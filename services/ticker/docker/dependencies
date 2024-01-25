@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -e
+
+# Required for using a newer PostgreSQL version:
+wget -q https://www.postgresql.org/media/keys/ACCC4CF8.asc -O- | apt-key add -
+echo "deb http://apt.postgresql.org/pub/repos/apt/ stretch-pgdg main" | tee /etc/apt/sources.list.d/postgresql.list
+
+
+# Install dependencies:
+apt-get update
+apt-get install -y \
+    curl \
+    git \
+    libpq-dev \
+    postgresql-client-9.5 \
+    postgresql-9.5 \
+    postgresql-contrib-9.5 \
+    sudo \
+    vim \
+    supervisor \
+    nginx \
+    cron
+apt-get clean
