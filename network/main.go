@@ -16,7 +16,7 @@ const (
 	// PublicNetworkPassphrase is the pass phrase used for every transaction intended for the public diamcircle network
 	PublicNetworkPassphrase = "Diamante MainNet; SEP 2022"
 	// TestNetworkPassphrase is the pass phrase used for every transaction intended for the SDF-run test network
-	TestNetworkPassphrase = "Diamante Testnet" //"Pyramid ; October 2022" //
+	TestNetworkPassphrase = "Diamante Testnet 2024" // Diamante Testnet //"Pyramid ; October 2022" //
 )
 
 // ID returns the network ID derived from the provided passphrase.  This value
